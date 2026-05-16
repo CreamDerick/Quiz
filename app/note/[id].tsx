@@ -103,8 +103,8 @@ export default function NoteDetailScreen() {
     setQuizError('');
     setGeneratingQuiz(true);
     try {
-      const apiKey = 'AIzaSyCGHDxXKVb2_MMCVCpRkgCmfmrVNI_MC3E';
-      console.log('Using Gemini API key:', apiKey.substring(0, 10) + '...');
+      const apiKey = process.env.EXPO_PUBLIC_GEMINI_API_KEY || '';
+      console.log('DEBUG: Using Gemini API key:', apiKey.substring(0, 10) + '...' + apiKey.slice(-5));
       const genAI = new GoogleGenerativeAI(apiKey);
       const model = genAI.getGenerativeModel({ model: 'gemini-flash-latest' });
 

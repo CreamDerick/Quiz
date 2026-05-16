@@ -28,8 +28,8 @@ export default function SignUpScreen() {
         data: { session },
         error 
       } = await supabase.auth.signUp({
-        email: email,
-        password: password,
+        email: email.trim(),
+        password: password.trim(),
       });
 
       if (error) {

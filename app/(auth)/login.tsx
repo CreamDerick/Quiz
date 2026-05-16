@@ -23,8 +23,8 @@ export default function LoginScreen() {
     setLoading(true);
     try {
       const { error } = await supabase.auth.signInWithPassword({
-        email: email,
-        password: password,
+        email: email.trim(),
+        password: password.trim(),
       });
 
       if (error) {

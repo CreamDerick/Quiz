@@ -2,15 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { StyleSheet, TextInput, TouchableOpacity, View, Alert, ScrollView, ActivityIndicator } from 'react-native';
 import { useRouter, Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
+import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/context/AuthContext';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-
-const genAI = new GoogleGenerativeAI('AIzaSyCGHDxXKVb2_MMCVCpRkgCmfmrVNI_MC3E');
+// genAI will be initialized inside the function to ensure the API key is picked up correctly
 
 export default function CreateNoteScreen() {
   const [subject, setSubject] = useState('');
@@ -18,27 +17,31 @@ export default function CreateNoteScreen() {
   const [loading, setLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
+  const [recording, setRecording] = useState<Audio.Recording | null>(null);
   const { user } = useAuth();
   const router = useRouter();
-  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
-
-  useEffect(() => {
-    return () => {
-      if (audioRecorder.isRecording) {
-        audioRecorder.stop();
-      }
-    };
-  }, []);
 
   async function startRecording() {
     try {
-      const status = await AudioModule.requestRecordingPermissionsAsync();
-      if (!status.granted) {
+      console.log('Requesting permissions...');
+      const permission = await Audio.requestPermissionsAsync();
+      if (permission.status !== 'granted') {
         Alert.alert('Permission denied', 'We need your permission to access the microphone.');
         return;
       }
-      await audioRecorder.record();
+
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      console.log('Starting recording...');
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+      setRecording(recording);
       setIsRecording(true);
+      console.log('Recording started');
     } catch (err) {
       console.error('Failed to start recording', err);
       Alert.alert('Error', 'Could not start recording. Please try again.');
@@ -46,10 +49,15 @@ export default function CreateNoteScreen() {
   }
 
   async function stopRecording() {
+    if (!recording) return;
+
+    console.log('Stopping recording...');
     setIsRecording(false);
     try {
-      await audioRecorder.stop();
-      const uri = audioRecorder.uri;
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
+      console.log('Recording stopped and stored at', uri);
+      setRecording(null);
       if (uri) {
         await transcribeAudio(uri);
       }
@@ -59,30 +67,77 @@ export default function CreateNoteScreen() {
   }
 
   async function transcribeAudio(uri: string) {
+    console.log('DEBUG: Starting transcription for URI:', uri);
     setTranscribing(true);
     try {
-      const base64Audio = await FileSystem.readAsStringAsync(uri, {
-        encoding: 'base64',
-      });
+      const apiKey = process.env.EXPO_PUBLIC_GEMINI_API_KEY || '';
+      if (!apiKey) {
+        throw new Error('Gemini API key is missing. Please check your .env file.');
+      }
+      
+      const genAI = new GoogleGenerativeAI(apiKey);
+      
+      let base64Audio = '';
+      try {
+        base64Audio = await FileSystem.readAsStringAsync(uri, {
+          encoding: 'base64',
+        });
+      } catch (fsError) {
+        console.log('FileSystem read failed, trying fetch approach...');
+        const response = await fetch(uri);
+        const blob = await response.blob();
+        base64Audio = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const result = reader.result as string;
+            resolve(result.split(',')[1]);
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      }
+
+      console.log('DEBUG: Base64 length:', base64Audio.length);
+      if (base64Audio.length < 100) {
+        throw new Error('The recorded audio seems empty. Please try speaking for a longer time.');
+      }
 
       const extension = uri.split('.').pop()?.toLowerCase();
-      const mimeType = extension === 'm4a' ? 'audio/mp4' :
-                       extension === 'wav' ? 'audio/wav' :
-                       extension === 'mp3' ? 'audio/mpeg' : 'audio/m4a';
+      let mimeType = 'audio/mp4'; // Default to a widely supported type
+      
+      if (uri.startsWith('blob:')) {
+        // On web, Chrome records in webm format. Gemini 1.5 Flash supports audio/webm.
+        mimeType = 'audio/webm'; 
+      } else {
+        mimeType = extension === 'm4a' ? 'audio/x-m4a' :
+                   extension === 'wav' ? 'audio/wav' :
+                   extension === 'mp3' ? 'audio/mpeg' : 'audio/webm';
+      }
+
+      console.log('DEBUG: Using MIME type:', mimeType);
 
       const model = genAI.getGenerativeModel({ model: 'gemini-flash-latest' });
-      const prompt = 'Please transcribe this audio lecture accurately. Only provide the transcription text, nothing else.';
+      
+      // Using a more forceful prompt to prevent hallucinations
+      const prompt = 'Transcribe the following audio recording exactly. Do not add any extra text, greetings, or suggestions. If you cannot hear anything, just return "..."';
+      
       const result = await model.generateContent([
-        prompt,
-        { inlineData: { mimeType, data: base64Audio } }
+        {
+          inlineData: {
+            mimeType: mimeType,
+            data: base64Audio
+          }
+        },
+        { text: prompt }
       ]);
 
       const response = await result.response;
       const text = response.text();
+      console.log('DEBUG: Transcription result:', text);
       setContent(prev => prev + (prev ? '\n\n' : '') + text);
     } catch (err: any) {
       console.error('Gemini transcription failed', err);
-      Alert.alert('Transcription Error', 'Failed to transcribe audio. Please check your Gemini API key.');
+      Alert.alert('Transcription Error', `Failed to transcribe: ${err.message}`);
     } finally {
       setTranscribing(false);
     }
